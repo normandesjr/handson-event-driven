@@ -1,0 +1,115 @@
+version: '2.1'
+
+services:
+  zoo1:
+    image: zookeeper:3.4.9
+    hostname: zoo1
+    ports:
+      - "2181:2181"
+    environment:
+      ZOO_MY_ID: 1
+      ZOO_PORT: 2181
+      ZOO_SERVERS: server.1=zoo1:2888:3888
+    volumes:
+      - ./zk-single-kafka-single/zoo1/data:/data
+      - ./zk-single-kafka-single/zoo1/datalog:/datalog
+
+  kafka1:
+    image: confluentinc/cp-kafka:5.5.1
+    hostname: kafka1
+    ports:
+      - "9092:9092"
+      - "9999:9999"
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka1:19092,LISTENER_DOCKER_EXTERNAL://${DOCKER_HOST_IP:-127.0.0.1}:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,LISTENER_DOCKER_EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ZOOKEEPER_CONNECT: "zoo1:2181"
+      KAFKA_BROKER_ID: 1
+      KAFKA_LOG4J_LOGGERS: "kafka.controller=INFO,kafka.producer.async.DefaultEventHandler=INFO,state.change.logger=INFO"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_JMX_PORT: 9999
+      KAFKA_JMX_HOSTNAME: ${DOCKER_HOST_IP:-127.0.0.1}
+    volumes:
+      - ./zk-single-kafka-single/kafka1/data:/var/lib/kafka/data
+    depends_on:
+      - zoo1
+
+  postgres:
+    image: postgres:9.6.17-alpine
+    ports:
+      - 5432:5432
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: rechargedb
+
+  flyway:
+    image: flyway/flyway:6.2.3-alpine
+    command: -url=jdbc:postgresql://postgres/rechargedb -user=postgres -password=postgres -connectRetries=60 migrate
+    volumes:
+      - ./migration/sql:/flyway/sql
+    depends_on:
+      - postgres
+
+  schemaregistry:
+    image: confluentinc/cp-schema-registry:5.5.1
+    hostname: schemaregistry
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_KAFKASTORE_CONNECTION_URL: "zoo1:2181"
+      SCHEMA_REGISTRY_HOST_NAME: schemaregistry
+      SCHEMA_REGISTRY_LISTENERS: "http://0.0.0.0:8081"
+    depends_on:
+      - zoo1
+
+  connect:
+    image: confluentinc/cp-kafka-connect:5.5.1
+    hostname: connect
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: PLAINTEXT://kafka1:19092
+      CONNECT_GROUP_ID: "connect"
+      CONNECT_CONFIG_STORAGE_TOPIC: "connect-config"
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_TOPIC: "connect-offsets"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_TOPIC: "connect-status"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
+      CONNECT_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_INTERNAL_KEY_CONVERTER: "org.apache.kafka.connect.storage.StringConverter"
+      CONNECT_INTERNAL_VALUE_CONVERTER: "org.apache.kafka.connect.json.JsonConverter"
+      CONNECT_REST_ADVERTISED_HOST_NAME: "localhost"
+      CONNECT_PLUGIN_PATH: "/usr/share/java"
+    depends_on:
+      - zoo1
+      - kafka1
+      - schemaregistry
+
+  ksql:
+    image: confluentinc/cp-ksql-server:5.4.3
+    hostname: ksql
+    ports:
+      - 8088:8088
+    environment:
+      KSQL_BOOTSTRAP_SERVERS: kafka1:19092
+      KSQL_KSQL_SCHEMA_REGISTRY_URL: http://schemaregistry:8081
+      KSQL_LISTENERS: http://0.0.0.0:8088
+      KSQL_KSQL_COMMIT_INTERVAL_MS: 2000
+      KSQL_KSQL_CACHE_MAX_BYTES_BUFFERING: 10000000
+      KSQL_KSQL_STREAMS_AUTO_OFFSET_RESET: earliest
+      KSQL_KSQL_SERVICE_ID: ksql_1_
+    depends_on:
+      - kafka1
+      - zoo1
+      - schemaregistry
+
+  ksql-cli:
+    image: confluentinc/cp-ksql-cli:5.4.3
+    depends_on:
+      - ksql
